@@ -16,6 +16,10 @@ panel to be open, since that is what establishes the GPS connection.
 Undo removes the most recent point saved this session (single level,
 point-only — never transects).
 
+The GeoPackage is created with BOTH the points and transects layers the
+first time either is needed, so capture order never matters. Existing
+files missing a layer are self-healed on next use.
+
 Data is stored in a GeoPackage saved alongside the project file, so records
 persist across sessions.
 """
@@ -23,7 +27,7 @@ persist across sessions.
 import os
 from qgis.PyQt.QtCore import Qt, QTimer, QDateTime
 from qgis.PyQt.QtGui import QIcon, QColor
-from qgis.PyQt.QtWidgets import QAction, QMessageBox, QToolBar
+from qgis.PyQt.QtWidgets import QAction, QMessageBox
 from qgis.core import (QgsProject, QgsVectorLayer, QgsFeature, QgsGeometry,
                        QgsPointXY, QgsCoordinateReferenceSystem,
                        QgsCoordinateTransform, QgsApplication,
@@ -71,7 +75,7 @@ class MacrophyteDataPlugin:
         self.last_point_id = None
 
         # Transect recording state
-        self.transect_toolbar = None
+        self.toolbar = None
         self.start_transect_action = None
         self.stop_transect_action = None
         self.transect_recording = False
@@ -90,16 +94,16 @@ class MacrophyteDataPlugin:
     def initGui(self):
         icon_path = os.path.join(self.plugin_dir, 'icon.png')
 
-        # One toolbar for everything
-        self.transect_toolbar = self.iface.addToolBar("Estuarine Habitat Validation")
-        self.transect_toolbar.setObjectName("EstuarineHabitatToolbar")
+        # One toolbar for the whole tool
+        self.toolbar = self.iface.addToolBar("Estuarine Habitat Validation")
+        self.toolbar.setObjectName("EstuarineHabitatToolbar")
 
         # Panel toggle
         action = QAction(QIcon(icon_path),
                          u'Estuarine Habitat Validation',
                          self.iface.mainWindow())
         action.triggered.connect(self.toggle_panel)
-        self.transect_toolbar.addAction(action)
+        self.toolbar.addAction(action)
         self.iface.addPluginToMenu(self.menu, action)
         self.actions.append(action)
 
@@ -129,28 +133,28 @@ class MacrophyteDataPlugin:
         # Map tool (one-shot map-click override)
         self.point_tool = QgsMapToolEmitPoint(self.iface.mapCanvas())
         self.point_tool.canvasClicked.connect(self._canvas_clicked)
-        
+
         # Transect actions on the same toolbar
-        self.transect_toolbar.addSeparator()
+        self.toolbar.addSeparator()
 
         self.start_transect_action = QAction("▶ Start Transect",
                                              self.iface.mainWindow())
         self.start_transect_action.triggered.connect(self.start_transect)
-        self.transect_toolbar.addAction(self.start_transect_action)
+        self.toolbar.addAction(self.start_transect_action)
 
         self.stop_transect_action = QAction("⏹ Stop Transect",
                                             self.iface.mainWindow())
         self.stop_transect_action.triggered.connect(self.stop_transect)
         self.stop_transect_action.setEnabled(False)
-        self.transect_toolbar.addAction(self.stop_transect_action)
+        self.toolbar.addAction(self.stop_transect_action)
 
+        # Start watchdog — keeps attached to the live GPS connection
         self.gps_watchdog.start()
 
     def _on_dock_visibility_changed(self, visible: bool):
         if visible:
             self._connect_gps()
         else:
-            # If a transect is running when the panel closes, stop and save it
             if self.transect_recording:
                 self.stop_transect()
             self._disarm_map_click()
@@ -166,14 +170,14 @@ class MacrophyteDataPlugin:
         self._disconnect_gps()
         self._disarm_map_click()
         self._clear_pending_marker()
-        if self.transect_toolbar:
-            del self.transect_toolbar
-            self.transect_toolbar = None
+        if self.toolbar:
+            del self.toolbar
+            self.toolbar = None
         if self.dock:
             self.iface.mainWindow().removeDockWidget(self.dock)
             self.dock.deleteLater()
             self.dock = None
-            
+
     # ------------------------------------------------------------------
     # Panel visibility
     # ------------------------------------------------------------------
@@ -250,7 +254,6 @@ class MacrophyteDataPlugin:
         if self.transect_recording:
             return
 
-        # GPS must be live — the panel must be open and connected
         if self.gps_connection is None or self.dock_widget.longitude is None:
             QMessageBox.warning(
                 self.iface.mainWindow(), "No GPS",
@@ -263,13 +266,11 @@ class MacrophyteDataPlugin:
         self.transect_start_time = QDateTime.currentDateTime()
         self.transect_recording = True
 
-        # Live rubber band on the canvas (canvas CRS)
         self.transect_rubberband = QgsRubberBand(
             self.iface.mapCanvas(), Qgis.GeometryType.Line)
         self.transect_rubberband.setColor(QColor(230, 81, 0))  # orange
         self.transect_rubberband.setWidth(3)
 
-        # Seed with the current position
         self._append_transect_vertex(self.dock_widget.longitude,
                                      self.dock_widget.latitude)
 
@@ -279,8 +280,7 @@ class MacrophyteDataPlugin:
             "Transect", "Recording started — move along the transect.")
 
     def _append_transect_vertex(self, lon, lat):
-        pt_wgs84 = QgsPointXY(lon, lat)
-        self.transect_vertices.append(pt_wgs84)
+        self.transect_vertices.append(QgsPointXY(lon, lat))
         if self.transect_rubberband is not None:
             self.transect_rubberband.addPoint(self._to_canvas_crs(lon, lat))
 
@@ -296,7 +296,6 @@ class MacrophyteDataPlugin:
         self._clear_transect_rubberband()
         self.transect_vertices = []
 
-        # Need at least two distinct vertices to form a line
         if len(vertices) < 2:
             self.iface.messageBar().pushWarning(
                 "Transect", "Too few points recorded — transect discarded.")
@@ -353,8 +352,7 @@ class MacrophyteDataPlugin:
 
     def _undo_last_point(self):
         if self.last_point_id is None:
-            self.iface.messageBar().pushInfo(
-                "Undo", "No recent point to undo.")
+            self.iface.messageBar().pushInfo("Undo", "No recent point to undo.")
             return
 
         layer = self._get_or_create_layer()
@@ -363,8 +361,7 @@ class MacrophyteDataPlugin:
 
         fid = self._last_point_fid(layer)
         if fid is None:
-            self.iface.messageBar().pushInfo(
-                "Undo", "No recent point to undo.")
+            self.iface.messageBar().pushInfo("Undo", "No recent point to undo.")
             self.last_point_id = None
             return
 
@@ -381,8 +378,6 @@ class MacrophyteDataPlugin:
                 "Undo", "Could not remove the last point.")
 
     def _last_point_fid(self, layer):
-        """Find the internal feature id (fid) for the last saved point,
-        looked up by its 'id' attribute — the two aren't guaranteed equal."""
         for f in layer.getFeatures():
             if f['id'] == self.last_point_id:
                 return f.id()
@@ -491,7 +486,7 @@ class MacrophyteDataPlugin:
             self.marker = None
 
     # ------------------------------------------------------------------
-    # Layer management — points
+    # GeoPackage — both layers created together, order-independent
     # ------------------------------------------------------------------
 
     def _gpkg_path(self):
@@ -506,32 +501,35 @@ class MacrophyteDataPlugin:
             return None
         return os.path.join(os.path.dirname(project_path), GPKG_FILENAME)
 
-    def _get_or_create_layer(self):
-        layers = QgsProject.instance().mapLayersByName(LAYER_NAME)
-        if layers:
-            return layers[0]
+    def _gpkg_has_layer(self, gpkg_path, layer_name):
+        """True if the GeoPackage already contains the named layer."""
+        probe = QgsVectorLayer(f"{gpkg_path}|layername={layer_name}",
+                               "probe", "ogr")
+        return probe.isValid()
 
+    def _ensure_gpkg(self):
+        """Ensure the GeoPackage exists with BOTH layers. Returns the gpkg
+        path, or None if the project isn't saved. Safe to call repeatedly —
+        creates only the layers that are missing, so an existing file that
+        lacks a layer is self-healed."""
         gpkg_path = self._gpkg_path()
         if not gpkg_path:
             return None
 
-        if os.path.exists(gpkg_path):
-            uri = f"{gpkg_path}|layername={LAYER_NAME}"
-            layer = QgsVectorLayer(uri, LAYER_NAME, "ogr")
-            if layer.isValid():
-                QgsProject.instance().addMapLayer(layer)
-                return layer
-            else:
-                QMessageBox.warning(
-                    self.iface.mainWindow(), "Layer load failed",
-                    f"Found {GPKG_FILENAME} but couldn't load the "
-                    f"'{LAYER_NAME}' layer from it. Check the file isn't "
-                    "corrupted or locked by another program.")
+        file_exists = os.path.exists(gpkg_path)
+
+        if not file_exists or not self._gpkg_has_layer(gpkg_path, LAYER_NAME):
+            if not self._write_points_layer(gpkg_path, file_exists):
+                return None
+            file_exists = True  # the file certainly exists now
+
+        if not self._gpkg_has_layer(gpkg_path, TRANSECT_LAYER_NAME):
+            if not self._write_transect_layer(gpkg_path, file_exists):
                 return None
 
-        return self._create_new_gpkg_layer(gpkg_path)
+        return gpkg_path
 
-    def _create_new_gpkg_layer(self, gpkg_path):
+    def _write_points_layer(self, gpkg_path, file_exists):
         fields = QgsFields()
         fields.append(QgsField("id",        FIELD_INT))
         fields.append(QgsField("habitat",   FIELD_STRING))
@@ -541,102 +539,93 @@ class MacrophyteDataPlugin:
         fields.append(QgsField("timestamp", FIELD_STRING))
         fields.append(QgsField("source",    FIELD_STRING))
 
-        save_options = QgsVectorFileWriter.SaveVectorOptions()
-        save_options.driverName = "GPKG"
-        save_options.fileEncoding = "UTF-8"
-        save_options.layerName = LAYER_NAME
+        opts = QgsVectorFileWriter.SaveVectorOptions()
+        opts.driverName = "GPKG"
+        opts.fileEncoding = "UTF-8"
+        opts.layerName = LAYER_NAME
+        if file_exists:
+            opts.actionOnExistingFile = \
+                QgsVectorFileWriter.CreateOrOverwriteLayer
 
         writer = QgsVectorFileWriter.create(
-            gpkg_path,
-            fields,
-            Qgis.WkbType.Point,
+            gpkg_path, fields, Qgis.WkbType.Point,
             QgsCoordinateReferenceSystem("EPSG:4326"),
-            QgsProject.instance().transformContext(),
-            save_options
-        )
+            QgsProject.instance().transformContext(), opts)
 
         if writer.hasError() != QgsVectorFileWriter.NoError:
             QMessageBox.critical(
                 self.iface.mainWindow(), "GeoPackage creation failed",
-                f"Could not create {GPKG_FILENAME}:\n{writer.errorMessage()}")
-            return None
-
+                f"Could not create the points layer:\n{writer.errorMessage()}")
+            del writer
+            return False
         del writer
+        return True
 
-        uri = f"{gpkg_path}|layername={LAYER_NAME}"
-        layer = QgsVectorLayer(uri, LAYER_NAME, "ogr")
-        if not layer.isValid():
-            QMessageBox.critical(
-                self.iface.mainWindow(), "Layer load failed",
-                f"Created {GPKG_FILENAME} but the layer failed to load.")
-            return None
-
-        self._apply_labelling(layer)
-        QgsProject.instance().addMapLayer(layer)
-        return layer
-
-    # ------------------------------------------------------------------
-    # Layer management — transects
-    # ------------------------------------------------------------------
-
-    def _get_or_create_transect_layer(self):
-        layers = QgsProject.instance().mapLayersByName(TRANSECT_LAYER_NAME)
-        if layers:
-            return layers[0]
-
-        gpkg_path = self._gpkg_path()
-        if not gpkg_path:
-            return None
-
-        if os.path.exists(gpkg_path):
-            uri = f"{gpkg_path}|layername={TRANSECT_LAYER_NAME}"
-            layer = QgsVectorLayer(uri, TRANSECT_LAYER_NAME, "ogr")
-            if layer.isValid():
-                QgsProject.instance().addMapLayer(layer)
-                return layer
-
-        return self._create_transect_layer(gpkg_path)
-
-    def _create_transect_layer(self, gpkg_path):
+    def _write_transect_layer(self, gpkg_path, file_exists):
         fields = QgsFields()
         fields.append(QgsField("id",           FIELD_INT))
         fields.append(QgsField("start_time",   FIELD_STRING))
         fields.append(QgsField("end_time",     FIELD_STRING))
         fields.append(QgsField("vertex_count", FIELD_INT))
 
-        save_options = QgsVectorFileWriter.SaveVectorOptions()
-        save_options.driverName = "GPKG"
-        save_options.fileEncoding = "UTF-8"
-        save_options.layerName = TRANSECT_LAYER_NAME
-        # If the GeoPackage already exists (points layer created it),
-        # append this as an additional layer rather than overwriting.
-        if os.path.exists(gpkg_path):
-            save_options.actionOnExistingFile = \
+        opts = QgsVectorFileWriter.SaveVectorOptions()
+        opts.driverName = "GPKG"
+        opts.fileEncoding = "UTF-8"
+        opts.layerName = TRANSECT_LAYER_NAME
+        if file_exists:
+            opts.actionOnExistingFile = \
                 QgsVectorFileWriter.CreateOrOverwriteLayer
 
         writer = QgsVectorFileWriter.create(
-            gpkg_path,
-            fields,
-            Qgis.WkbType.LineString,
+            gpkg_path, fields, Qgis.WkbType.LineString,
             QgsCoordinateReferenceSystem("EPSG:4326"),
-            QgsProject.instance().transformContext(),
-            save_options
-        )
+            QgsProject.instance().transformContext(), opts)
 
         if writer.hasError() != QgsVectorFileWriter.NoError:
             QMessageBox.critical(
                 self.iface.mainWindow(), "Transect layer creation failed",
                 f"Could not create the transect layer:\n{writer.errorMessage()}")
+            del writer
+            return False
+        del writer
+        return True
+
+    def _get_or_create_layer(self):
+        layers = QgsProject.instance().mapLayersByName(LAYER_NAME)
+        if layers:
+            return layers[0]
+
+        if not self._ensure_gpkg():
             return None
 
-        del writer
+        gpkg_path = self._gpkg_path()
+        layer = QgsVectorLayer(f"{gpkg_path}|layername={LAYER_NAME}",
+                               LAYER_NAME, "ogr")
+        if not layer.isValid():
+            QMessageBox.critical(
+                self.iface.mainWindow(), "Layer load failed",
+                f"The '{LAYER_NAME}' layer failed to load.")
+            return None
 
-        uri = f"{gpkg_path}|layername={TRANSECT_LAYER_NAME}"
-        layer = QgsVectorLayer(uri, TRANSECT_LAYER_NAME, "ogr")
+        self._apply_labelling(layer)
+        QgsProject.instance().addMapLayer(layer)
+        return layer
+
+    def _get_or_create_transect_layer(self):
+        layers = QgsProject.instance().mapLayersByName(TRANSECT_LAYER_NAME)
+        if layers:
+            return layers[0]
+
+        if not self._ensure_gpkg():
+            return None
+
+        gpkg_path = self._gpkg_path()
+        layer = QgsVectorLayer(f"{gpkg_path}|layername={TRANSECT_LAYER_NAME}",
+                               TRANSECT_LAYER_NAME, "ogr")
         if not layer.isValid():
             QMessageBox.critical(
                 self.iface.mainWindow(), "Transect layer load failed",
-                "Created the transect layer but it failed to load.")
+                f"The '{TRANSECT_LAYER_NAME}' layer failed to load.")
             return None
 
         QgsProject.instance().addMapLayer(layer)
@@ -660,11 +649,7 @@ class MacrophyteDataPlugin:
             return
 
         layer.saveStyleToDatabase(
-            LAYER_NAME,
-            "Default validation labelling",
-            True,
-            ""
-        )
+            LAYER_NAME, "Default validation labelling", True, "")
         layer.triggerRepaint()
 
     # ------------------------------------------------------------------
@@ -715,5 +700,5 @@ class MacrophyteDataPlugin:
         layer.triggerRepaint()
         self.iface.mapCanvas().refresh()
         self._clear_pending_marker()
-        self.last_point_id = int(next_id)   # remember for Undo
+        self.last_point_id = int(next_id)
         return True
