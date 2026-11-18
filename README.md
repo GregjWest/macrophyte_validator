@@ -160,4 +160,4 @@ Contributions and issues welcome via GitHub.
 
 ## Licence
 
- GNU GENERAL PUBLIC LICENSE Version 2
+GNU GENERAL PUBLIC LICENSE Version 3
