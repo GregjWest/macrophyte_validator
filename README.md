@@ -160,4 +160,4 @@ Contributions and issues welcome via GitHub.
 
 ## Licence
 
-GNU GENERAL PUBLIC LICENSE Version 3
+Released under the **GNU General Public License v3.0 or later**. See [LICENSE](LICENSE) for the full text.
