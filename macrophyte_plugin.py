@@ -92,7 +92,7 @@ class MacrophyteDataPlugin:
     # ------------------------------------------------------------------
 
     def initGui(self):
-        icon_path = os.path.join(self.plugin_dir, 'icon.png')
+        icon_path = os.path.join(self.plugin_dir, 'icon.svg')
 
         # One toolbar for the whole tool
         self.toolbar = self.iface.addToolBar("Estuarine Habitat Validation")

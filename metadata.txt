@@ -17,7 +17,7 @@ tags=field data,gps,seagrass,mangrove,saltmarsh,marine,coastal
 
 homepage=https://github.com/GregjWest/QGIS_macrophyte_validator
 category=Vector
-icon=icon.png
+icon=icon.svg
 
 experimental=False
 deprecated=False
