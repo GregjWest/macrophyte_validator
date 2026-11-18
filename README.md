@@ -160,4 +160,4 @@ Contributions and issues welcome via GitHub.
 
 ## Licence
 
-MIT License — free to use, modify, and distribute.
+ GNU GENERAL PUBLIC LICENSE Version 2
